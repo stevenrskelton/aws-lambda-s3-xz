@@ -9,17 +9,19 @@ import org.tukaani.xz.XZOutputStream;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.FilterInputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.util.zip.CRC32;
+import java.util.zip.CheckedOutputStream;
 
 public class XZTarFile implements AutoCloseable {
 
     public final File file;
 
-    private final int bufferSize = 8048;
-
+    private static final int bufferSize = 8048;
+    
     private final FileOutputStream fileOutputStream;
-    private final CRC32OutputStream crc32OutputStream;
+    private final CheckedOutputStream checkedOutputStream;
     private final XZOutputStream xzOutputStream;
     private final TarArchiveOutputStream tarOutputStream;
 
@@ -30,29 +32,32 @@ public class XZTarFile implements AutoCloseable {
     public XZTarFile(@NotNull File file, int compressionLevel) throws IOException {
         this.file = file;
         this.fileOutputStream = new FileOutputStream(file);
-        this.crc32OutputStream = new CRC32OutputStream(fileOutputStream);
-        this.xzOutputStream = new XZOutputStream(crc32OutputStream, new LZMA2Options(compressionLevel), XZ.CHECK_SHA256);
+        this.checkedOutputStream = new CheckedOutputStream(fileOutputStream, new CRC32());
+        this.xzOutputStream = new XZOutputStream(checkedOutputStream, new LZMA2Options(compressionLevel), XZ.CHECK_SHA256);
         this.tarOutputStream = new TarArchiveOutputStream(xzOutputStream);
     }
 
     @Override
     public void close() throws Exception {
+        getCRC32();
         tarOutputStream.close();
         xzOutputStream.close();
-        crc32OutputStream.close();
+        checkedOutputStream.close();
         fileOutputStream.close();
     }
 
-    public long crc32() throws IOException {
+    public long getCRC32() throws IOException {
         tarOutputStream.flush();
         xzOutputStream.flush();
-        crc32OutputStream.flush();
+        checkedOutputStream.flush();
         fileOutputStream.flush();
-        return crc32OutputStream.crc32();
+        return checkedOutputStream.getChecksum().getValue();
     }
 
-    public void putEntry(@NotNull String name, @NotNull FilterInputStream body) throws IOException {
-        tarOutputStream.putArchiveEntry(new TarArchiveEntry(name));
+    public void putEntry(@NotNull String name, long fileSize, @NotNull InputStream body) throws IOException {
+        final TarArchiveEntry tarArchiveEntry = new TarArchiveEntry(name);
+        tarArchiveEntry.setSize(fileSize);
+        tarOutputStream.putArchiveEntry(tarArchiveEntry);
         final byte[] buf = new byte[bufferSize];
         int len;
         while ((len = body.read(buf)) > 0) {

@@ -1,35 +1,27 @@
 package ca.stevenskelton.aws.lambda.s3xz;
 
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.IOException;
-import java.io.InputStream;
-import java.math.BigInteger;
-import java.nio.file.Files;
-import java.util.*;
-
-import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPEvent;
-import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPResponse;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import software.amazon.awssdk.awscore.exception.AwsServiceException;
-import software.amazon.awssdk.core.ResponseInputStream;
-import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.services.s3.model.*;
-import software.amazon.awssdk.services.s3.S3Client;
-
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.LambdaLogger;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
-import com.amazonaws.services.lambda.runtime.events.S3Event;
+import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPEvent;
+import com.amazonaws.services.lambda.runtime.events.APIGatewayV2HTTPResponse;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.*;
 import software.amazon.awssdk.services.s3.paginators.ListObjectsV2Iterable;
 
+import java.io.File;
+import java.io.IOException;
+import java.math.BigInteger;
+import java.nio.file.Files;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+
 public class Handler implements RequestHandler<APIGatewayV2HTTPEvent, APIGatewayV2HTTPResponse> {
-//    private static final float MAX_DIMENSION = 100;
-//    private final String REGEX = ".*\\.([^\\.]*)";
-//    private final String JPG_TYPE = "jpg";
-//    private final String JPG_MIME = "image/jpeg";
-//    private final String PNG_TYPE = "png";
-//    private final String PNG_MIME = "image/png";
 
     public APIGatewayV2HTTPResponse handleRequest(APIGatewayV2HTTPEvent event, Context context) {
         final LambdaLogger logger = context.getLogger();
@@ -53,49 +45,51 @@ public class Handler implements RequestHandler<APIGatewayV2HTTPEvent, APIGateway
             final XZTarFile xzTarFile = new XZTarFile(tarFile);
             final List<ObjectIdentifier> deleteObjectIndentifiers = new ArrayList<>(folderContents.size());
 
-            for(S3Object s3Object : folderContents){
+            for (S3Object s3Object : folderContents) {
                 logger.log(s3Object.key() + ", " + s3Object.size() + " bytes");
                 final GetObjectRequest getObjectRequest = GetObjectRequest.builder()
                         .bucket(request.bucketName())
                         .key(s3Object.key())
                         .build();
-                final ResponseInputStream responseInputStream = s3Client.getObject(getObjectRequest);
-                xzTarFile.putEntry(s3Object.key(), responseInputStream);
+                final ResponseInputStream<GetObjectResponse> responseInputStream = s3Client.getObject(getObjectRequest);
+                xzTarFile.putEntry(s3Object.key(), s3Object.size(), responseInputStream);
                 deleteObjectIndentifiers.add(ObjectIdentifier.builder().key(s3Object.key()).build());
             }
-            final long tarFileCRC32 = xzTarFile.crc32();
+            final long tarFileCRC32 = xzTarFile.getCRC32();
 
             final String tarFileBase64CRC32 = Base64.getEncoder().encodeToString(BigInteger.valueOf(tarFileCRC32).toByteArray());
-            logger.log("Created " + tarFile.getAbsolutePath() + ", " + Files.size(tarFile.toPath()) + "  bytes (" + folderBytes + " compressed), CRC32=" + tarFileBase64CRC32);
+            logger.log("Created " + tarFile.getAbsolutePath() + ", " + Files.size(tarFile.toPath()) +
+                    "  bytes (" + folderBytes + " compressed), CRC32=" + tarFileBase64CRC32);
             final PutObjectRequest putObjectRequest = PutObjectRequest.builder()
                     .bucket(request.bucketName())
                     .key(request.outputFileName())
+                    .contentType("application/tar+xz")
                     .build();
             final PutObjectResponse putObjectResponse = s3Client.putObject(putObjectRequest, RequestBody.fromFile(tarFile));
 
-            if(tarFileBase64CRC32.equals(putObjectResponse.checksumCRC32())) {
+            if (tarFileBase64CRC32.equals(putObjectResponse.checksumCRC32())) {
                 logger.log("Uploaded to S3 " + request.outputFileName() + " in bucket " + request.bucketName());
-                if(request.deleteAfterCompress()) {
+                if (request.deleteAfterCompress()) {
                     final DeleteObjectsRequest deleteObjectsRequest = DeleteObjectsRequest.builder()
                             .bucket(request.bucketName())
                             .delete(Delete.builder().objects(deleteObjectIndentifiers).build())
                             .build();
                     s3Client.deleteObjects(deleteObjectsRequest);
                 }
+                final Response response = new Response(
+                        request.outputFileName(),
+                        putObjectResponse.size(),
+                        folderContents.size(),
+                        folderBytes,
+                        request.deleteAfterCompress()
+                );
                 return new APIGatewayV2HTTPResponse(
-                    200, //statusCode
-                    Map.of("Content-Encoding", "gzip"), //headers
-                    Map.of(), //multiValueHeaders
-                    List.of(), //cookies
-                    "",
-    //                        objectMapper.writeValueAsString(Response(
-    //                                xzFileName = request.outputFileName(),
-    //                                xzFileSize = putObjectResponse.size(),
-    //                                inputFileCount = folderContents.size(),
-    //                                inputFileSize = folderBytes,
-    //                                deletedInputFiles = request.deleteAfterCompress(),
-    //                                ))), //body
-                    false //isBase64Encoded
+                        200, //statusCode
+                        Map.of(), //headers
+                        Map.of(), //multiValueHeaders
+                        List.of(), //cookies
+                        objectMapper.writeValueAsString(response), //body
+                        false //isBase64Encoded
                 );
             } else {
                 final RuntimeException ex = new RuntimeException("Upload failed, CRC32 " + putObjectResponse.checksumCRC32() + " but " + tarFileBase64CRC32 + "expected.");

@@ -6,5 +6,5 @@ public record Response(
         int inputFileCount,
         long inputFileSize,
         boolean deletedInputFiles
-        ) {
+) {
 }
